@@ -1,0 +1,146 @@
+import com.github.jengelman.gradle.plugins.processes.tasks.JavaFork
+import groovy.json.JsonSlurper
+
+
+buildscript {
+    repositories {
+        mavenCentral()
+        maven {
+            url 'https://plugins.gradle.org/m2/'
+        }
+    }
+    dependencies {
+        /*classpath 'org.springframework.boot:spring-boot-gradle-plugin:2.2.0.RELEASE'*/
+		classpath 'org.springframework.boot:spring-boot-gradle-plugin:2.1.10.RELEASE'
+        classpath 'com.github.johnrengelman.processes:com.github.johnrengelman.processes.gradle.plugin:0.4.1'
+    }
+}
+
+plugins {
+	id 'org.springframework.boot' version '2.1.10.RELEASE'
+	id 'io.spring.dependency-management' version '1.0.8.RELEASE'
+	id 'java'
+	id "com.github.johnrengelman.processes" version '0.5.0'
+}
+
+apply plugin: 'java'
+apply plugin: 'org.springframework.boot'
+apply plugin: 'scala'
+apply plugin: 'com.github.johnrengelman.processes'
+
+group = 'com.its'
+version = '0.0.1-SNAPSHOT'
+sourceCompatibility = '1.8'
+targetCompatibility = '1.8'
+
+/*configurations {
+	developmentOnly
+	runtimeClasspath {
+		extendsFrom developmentOnly
+	}
+	compileOnly {
+		extendsFrom annotationProcessor
+	}
+}*/
+
+repositories {
+	mavenCentral()
+}
+
+dependencies {
+	
+	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+	implementation 'org.springframework.boot:spring-boot-starter-web'
+	implementation 'org.springframework.boot:spring-boot-starter-actuator'
+
+
+	compileOnly 'org.projectlombok:lombok'
+	compileOnly 'org.codehaus.groovy:groovy-all:2.4.4'
+
+	testCompile 'org.scala-lang:scala-library:2.12.5'
+	testCompile 'io.gatling.highcharts:gatling-charts-highcharts:3.3.0'
+
+	/*developmentOnly 'org.springframework.boot:spring-boot-devtools'*/
+
+	runtimeOnly 'org.postgresql:postgresql'
+
+	annotationProcessor 'org.projectlombok:lombok'
+
+	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+	/*testImplementation 'io.gatling.highcharts:gatling-charts-highcharts:2.3.0'*/
+}
+
+task startSpringBoot(type: JavaFork) {
+	description = 'Start Card Service application in the background.'
+	group = 'Load Test'
+	classpath = sourceSets.main.runtimeClasspath
+	main = 'com.its.imperative2rx.Imperative2rxApplication'
+}
+
+startSpringBoot.dependsOn assemble
+
+task stopSpringBoot << {
+	description = 'Stop the instance of Card Service application that was started with \'startSpringBoot\''
+	group = 'Load Test'
+	startSpringBoot.processHandle.abort()
+}
+
+task waitUntilSpringBootIsUp << {
+	description = 'Call the /actuator/health endpoint and wait until it responds with the status UP.'
+	group = 'Load Test'
+	String healthCheckURL = 'http://localhost:8090/actuator/health'
+	boolean success = false
+	int count = 0
+	while (count < 15 && !success) {
+		println 'Trying to connect to \'' + healthCheckURL + '\' : Attempt number=' + count
+		try {
+			count += 1
+			JsonSlurper jsonSlurper = new JsonSlurper()
+			String healthCheckResponseBody = healthCheckURL.toURL().text
+			println healthCheckResponseBody
+
+			Object result = jsonSlurper.parseText(healthCheckResponseBody)
+			Map jsonResult = (Map) result
+
+			String status = (String) jsonResult.get('status')
+
+			success = (status == 'UP')
+		}
+		catch (all) {
+			sleep(5 * 1000) // wait for another 5 seconds until next retry
+		}
+	}
+	if (success) {
+		println 'SUCCEFULLY Connected to \'' + healthCheckURL + '\''
+	} else {
+		println 'FAILED to Connected to \'' + healthCheckURL + '\''
+	}
+}
+
+waitUntilSpringBootIsUp.dependsOn startSpringBoot
+
+task loadTest(type: JavaExec) {
+	description = 'Load Test of APIs With Gatling'
+	group = 'Load Test'
+	classpath = sourceSets.test.runtimeClasspath
+	jvmArgs = [
+            /*"-Dgatling.core.directory.binaries=${sourceSets.test.java.outputDir.toString()}",*/
+			"-Dgatling.core.directory.binaries=${sourceSets.test.output.classesDir.toString()}",
+            "-Dlogback.configurationFile=${logbackGatlingConfig()}"
+	]
+	main = "io.gatling.app.Gatling"
+	args = [
+			'--simulation', 'com.its.imperative2rx.GatlingApiLoadTest',
+			'--results-folder', "${buildDir}/gatling-results",
+			/*"--binaries-folder", sourceSets.test.java.outputDir.toString()*/
+			'--binaries-folder', sourceSets.test.output.classesDir.toString()
+
+	]
+}
+
+def logbackGatlingConfig() {
+    return sourceSets.test.resources.find { it.name == 'logback-gatling.xml'};
+}
+
+loadTest.dependsOn waitUntilSpringBootIsUp
+loadTest.finalizedBy stopSpringBoot
